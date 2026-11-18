@@ -1,0 +1,1151 @@
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge.go b/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge.go
+index 29b5bbbe1724a8bd6a5e6fed3b334c98cc964644..0551ea81ceb1ce3c1276d2e35999b820489478e8 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge.go
+@@ -465,12 +465,9 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
+ 	}
+ 
+ 	text := chatMessageContentText(message.Content)
+-	// DeepSeek reasoning-only fallback: when there is no text and no tool calls,
+-	// surface the reasoning content as visible text so the turn isn't empty.
+-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
+-		text = reasoning
+-	}
+-	if text != "" || len(message.ToolCalls) == 0 {
++	// A thinking block must stay separate from the final answer, including when
++	// the upstream stops before producing any answer text.
++	if text != "" || (len(message.ToolCalls) == 0 && len(blocks) == 0) {
+ 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
+ 	}
+ 
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge_test.go b/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge_test.go
+index 13cc945ca7d504a2415b4d62a1debc9bd05b1385..9cf15c05709169a08b22aafbbace2f11649117e1 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge_test.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge_test.go
+@@ -403,7 +403,7 @@ func TestChatCompletionsResponseToAnthropic_ToolUse(t *testing.T) {
+ 	require.Equal(t, "tool_use", AnthropicStopReasonString(out.StopReason))
+ }
+ 
+-func TestChatCompletionsResponseToAnthropic_ReasoningOnlyFallback(t *testing.T) {
++func TestChatCompletionsResponseToAnthropic_ReasoningOnlyStaysSeparate(t *testing.T) {
+ 	resp := &ChatCompletionsResponse{
+ 		ID:    "chatcmpl-3",
+ 		Model: "deepseek-v4-pro",
+@@ -418,12 +418,9 @@ func TestChatCompletionsResponseToAnthropic_ReasoningOnlyFallback(t *testing.T)
+ 	}
+ 
+ 	out := ChatCompletionsResponseToAnthropic(resp, "claude-sonnet-4-20250514")
+-	// thinking block + text block (fallback uses reasoning as visible text)
+-	require.Len(t, out.Content, 2)
++	require.Len(t, out.Content, 1)
+ 	require.Equal(t, "thinking", out.Content[0].Type)
+ 	require.Equal(t, "I should think about this", out.Content[0].Thinking)
+-	require.Equal(t, "text", out.Content[1].Type)
+-	require.Equal(t, "I should think about this", out.Content[1].Text)
+ }
+ 
+ func TestChatCompletionsResponseToAnthropic_FinishReasonLength(t *testing.T) {
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go b/backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go
+index ac7472e7784d9088cb9796900ddb90c325b67420..7bc5e21633b51907d612a8ffa29609dca326ae9c 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go
+@@ -1409,10 +1409,9 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
+ 	}
+ 
+ 	text := chatMessageContentText(message.Content)
+-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
+-		text = reasoning
+-	}
+-	if text != "" || len(message.ToolCalls) == 0 {
++	// Reasoning is a separate protocol item, never a replacement for the final
++	// answer. Preserve the empty-message fallback only for truly empty turns.
++	if text != "" || (len(message.ToolCalls) == 0 && len(outputs) == 0) {
+ 		outputs = append(outputs, ResponsesOutput{
+ 			Type: "message",
+ 			ID:   generateItemID(),
+@@ -1809,7 +1808,6 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
+ 	// Close a reasoning item that never transitioned to content (reasoning-only
+ 	// or empty completion).
+ 	events = append(events, closeChatReasoningItem(state)...)
+-	events = append(events, synthesizeChatReasoningFallbackMessage(state)...)
+ 
+ 	if state.MessageItemID != "" {
+ 		if state.TextPartOpen {
+@@ -1944,33 +1942,6 @@ func closeChatReasoningItem(state *ChatCompletionsToResponsesStreamState) []Resp
+ 	}
+ }
+ 
+-func synthesizeChatReasoningFallbackMessage(state *ChatCompletionsToResponsesStreamState) []ResponsesStreamEvent {
+-	if state == nil ||
+-		state.MessageItemID != "" ||
+-		state.Text.Len() > 0 ||
+-		state.Reasoning.Len() == 0 ||
+-		len(state.ToolCalls) > 0 {
+-		return nil
+-	}
+-
+-	text := state.Reasoning.String()
+-	if strings.TrimSpace(text) == "" {
+-		return nil
+-	}
+-
+-	var events []ResponsesStreamEvent
+-	events = append(events, ensureChatToResponsesMessageItem(state)...)
+-	events = append(events, ensureChatToResponsesTextPart(state)...)
+-	_, _ = state.Text.WriteString(text)
+-	events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
+-		OutputIndex:  state.MessageIndex,
+-		ContentIndex: 0,
+-		Delta:        text,
+-		ItemID:       state.MessageItemID,
+-	}))
+-	return events
+-}
+-
+ func ensureChatToResponsesMessageItem(state *ChatCompletionsToResponsesStreamState) []ResponsesStreamEvent {
+ 	if state.MessageItemID != "" {
+ 		return nil
+@@ -2178,7 +2149,7 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
+ 			}},
+ 		})
+ 	}
+-	if state.MessageItemID != "" || len(state.ToolCalls) == 0 {
++	if state.MessageItemID != "" || (len(state.ToolCalls) == 0 && len(outputs) == 0) {
+ 		outputs = append(outputs, ResponsesOutput{
+ 			Type: "message",
+ 			ID:   nonEmpty(state.MessageItemID, generateItemID()),
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_responses_stream_lifecycle_test.go b/backend/internal/pkg/apicompat/chatcompletions_responses_stream_lifecycle_test.go
+index 1a986b60d9d7a3de543a8b04fbe5cfe522fc9989..b1183c62a26aa49963b803b3def7350aa31ddc7d 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_responses_stream_lifecycle_test.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_responses_stream_lifecycle_test.go
+@@ -45,46 +45,44 @@ func TestStream_ReasoningOpensItemBeforeDelta(t *testing.T) {
+ 	}
+ }
+ 
+-func TestStream_ReasoningOnlySynthesizesVisibleText(t *testing.T) {
++func TestStream_ReasoningOnlyDoesNotBecomeVisibleText(t *testing.T) {
+ 	events := collectStreamEvents(t, []string{
+ 		`{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}`,
+ 		`{"choices":[{"index":0,"delta":{"reasoning_content":"thinking before final"}}]}`,
+ 		`{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`,
+ 	})
+ 
+-	open := map[int]string{}
+-	var sawTextDelta, sawTextDone, sawMessageDone bool
++	var sawReasoningDone, sawCompleted bool
+ 	for _, e := range events {
+ 		switch e.Type {
+ 		case "response.output_item.added":
+ 			require.NotNil(t, e.Item)
+-			open[e.OutputIndex] = e.Item.Type
+-		case "response.output_text.delta":
+-			sawTextDelta = true
+-			require.Equalf(t, "message", open[e.OutputIndex], "fallback text delta before its item was opened")
+-			require.Equal(t, "thinking before final", e.Delta)
+-		case "response.output_text.done":
+-			sawTextDone = true
++			require.NotEqual(t, "message", e.Item.Type)
++		case "response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done":
++			t.Fatalf("reasoning-only stream produced answer event %s", e.Type)
++		case "response.reasoning_summary_text.done":
++			sawReasoningDone = true
+ 			require.Equal(t, "thinking before final", e.Text)
+ 		case "response.output_item.done":
+-			if e.Item != nil && e.Item.Type == "message" {
+-				sawMessageDone = true
+-				require.Equal(t, "thinking before final", e.Item.Content[0].Text)
+-			}
++			require.NotNil(t, e.Item)
++			require.Equal(t, "reasoning", e.Item.Type)
+ 		case "response.completed":
++			sawCompleted = true
+ 			require.NotNil(t, e.Response)
+ 			require.Equal(t, "incomplete", e.Response.Status)
+ 			require.NotNil(t, e.Response.IncompleteDetails)
+ 			require.Equal(t, "max_output_tokens", e.Response.IncompleteDetails.Reason)
+-			require.Len(t, e.Response.Output, 2)
++			require.Len(t, e.Response.Output, 1)
+ 			require.Equal(t, "reasoning", e.Response.Output[0].Type)
+-			require.Equal(t, "message", e.Response.Output[1].Type)
+-			require.Equal(t, "thinking before final", e.Response.Output[1].Content[0].Text)
++			require.Equal(t, "thinking before final", e.Response.Output[0].Summary[0].Text)
++			require.NotNil(t, e.Response.Usage)
++			require.Equal(t, 1, e.Response.Usage.InputTokens)
++			require.Equal(t, 2, e.Response.Usage.OutputTokens)
++			require.Equal(t, 3, e.Response.Usage.TotalTokens)
+ 		}
+ 	}
+-	require.True(t, sawTextDelta, "reasoning-only stream must produce visible text delta")
+-	require.True(t, sawTextDone, "reasoning-only stream must close visible text part")
+-	require.True(t, sawMessageDone, "reasoning-only stream must close synthesized message item")
++	require.True(t, sawReasoningDone, "reasoning-only stream must close its reasoning item")
++	require.True(t, sawCompleted, "reasoning-only stream must retain a terminal response")
+ }
+ 
+ func TestStream_ReasoningOnlyBlankDoesNotSynthesizeVisibleText(t *testing.T) {
+@@ -97,10 +95,9 @@ func TestStream_ReasoningOnlyBlankDoesNotSynthesizeVisibleText(t *testing.T) {
+ 		require.NotEqual(t, "response.output_text.delta", e.Type)
+ 		if e.Type == "response.completed" {
+ 			require.NotNil(t, e.Response)
+-			require.Len(t, e.Response.Output, 2)
++			require.Len(t, e.Response.Output, 1)
+ 			require.Equal(t, "reasoning", e.Response.Output[0].Type)
+-			require.Equal(t, "message", e.Response.Output[1].Type)
+-			require.Equal(t, "", e.Response.Output[1].Content[0].Text)
++			require.Equal(t, "   ", e.Response.Output[0].Summary[0].Text)
+ 		}
+ 	}
+ }
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_responses_test.go b/backend/internal/pkg/apicompat/chatcompletions_responses_test.go
+index 21a8c05d36e6dad19facdceecf904dd2b24868fd..4dcc253ad99c232108e4edffb5a5cd80595f8e5f 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_responses_test.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_responses_test.go
+@@ -119,28 +119,29 @@ func TestChatCompletionsToResponses_MessageTypesWithReasoningAndTools(t *testing
+ 
+ 	var items []ResponsesInputItem
+ 	require.NoError(t, json.Unmarshal(resp.Input, &items))
+-	require.Len(t, items, 7)
++	require.Len(t, items, 8)
+ 	for i, want := range []struct{ typ, role string }{
+ 		{"message", "system"},
+ 		{"message", "user"},
++		{"reasoning", ""},
+ 		{"message", "assistant"},
+ 		{"function_call", ""},
+ 		{"function_call_output", ""},
+-		{"message", "assistant"},
++		{"reasoning", ""},
+ 		{"message", "user"},
+ 	} {
+ 		assert.Equal(t, want.typ, items[i].Type, "input item %d type", i)
+ 		assert.Equal(t, want.role, items[i].Role, "input item %d role", i)
+ 	}
+-	var assistantContent, reasoningOnlyContent []ResponsesContentPart
+-	require.NoError(t, json.Unmarshal(items[2].Content, &assistantContent))
+-	require.NoError(t, json.Unmarshal(items[5].Content, &reasoningOnlyContent))
++	var assistantContent []ResponsesContentPart
++	require.NoError(t, json.Unmarshal(items[3].Content, &assistantContent))
+ 	require.Len(t, assistantContent, 1)
+-	require.Len(t, reasoningOnlyContent, 1)
+-	assert.Equal(t, "<thinking>Need to inspect the directory.</thinking>\nI will check.", assistantContent[0].Text)
+-	assert.Equal(t, "<thinking>The tool returned /tmp.</thinking>", reasoningOnlyContent[0].Text)
+-	assert.Equal(t, "call_1", items[3].CallID)
++	assert.Equal(t, "I will check.", assistantContent[0].Text)
++	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "Need to inspect the directory."}}, items[2].Summary)
++	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "The tool returned /tmp."}}, items[6].Summary)
++	assert.Empty(t, items[6].Content)
+ 	assert.Equal(t, "call_1", items[4].CallID)
++	assert.Equal(t, "call_1", items[5].CallID)
+ }
+ 
+ func TestChatCompletionsToResponses_ToolCalls(t *testing.T) {
+@@ -653,7 +654,7 @@ func TestChatCompletionsToResponses_EmptyContentNeverNull(t *testing.T) {
+ 	}
+ }
+ 
+-func TestChatCompletionsResponseToResponses_DeepSeekReasoningOnlyFallsBackToMessageText(t *testing.T) {
++func TestChatCompletionsResponseToResponses_DeepSeekReasoningOnlyStaysSeparate(t *testing.T) {
+ 	content := json.RawMessage(`""`)
+ 	resp := &ChatCompletionsResponse{
+ 		ID:     "chatcmpl_deepseek_reasoning_only",
+@@ -672,11 +673,10 @@ func TestChatCompletionsResponseToResponses_DeepSeekReasoningOnlyFallsBackToMess
+ 
+ 	out := ChatCompletionsResponseToResponses(resp, "deepseek-reasoner", nil, nil, false, nil)
+ 
+-	require.Len(t, out.Output, 2)
++	require.Len(t, out.Output, 1)
+ 	require.Equal(t, "reasoning", out.Output[0].Type)
+-	require.Equal(t, "message", out.Output[1].Type)
+-	require.Len(t, out.Output[1].Content, 1)
+-	assert.Equal(t, "reasoning-only answer", out.Output[1].Content[0].Text)
++	require.Len(t, out.Output[0].Summary, 1)
++	assert.Equal(t, "reasoning-only answer", out.Output[0].Summary[0].Text)
+ }
+ 
+ func TestChatCompletionsResponseToResponses_DeepSeekReasoningToolCallDoesNotFallbackToMessageText(t *testing.T) {
+@@ -903,7 +903,7 @@ func TestChatCompletionsToResponses_AssistantArrayContentPreserved(t *testing.T)
+ 	assert.Equal(t, "AB", parts[0].Text)
+ }
+ 
+-func TestChatCompletionsToResponses_AssistantThinkingTagPreserved(t *testing.T) {
++func TestChatCompletionsToResponses_AssistantStructuredThinkingIsolated(t *testing.T) {
+ 	req := &ChatCompletionsRequest{
+ 		Model: "gpt-4o",
+ 		Messages: []ChatMessage{
+@@ -917,17 +917,18 @@ func TestChatCompletionsToResponses_AssistantThinkingTagPreserved(t *testing.T)
+ 
+ 	var items []ResponsesInputItem
+ 	require.NoError(t, json.Unmarshal(resp.Input, &items))
+-	require.Len(t, items, 2)
++	require.Len(t, items, 3)
++	assert.Equal(t, "reasoning", items[1].Type)
++	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "internal plan"}}, items[1].Summary)
+ 
+ 	var parts []ResponsesContentPart
+-	require.NoError(t, json.Unmarshal(items[1].Content, &parts))
++	require.NoError(t, json.Unmarshal(items[2].Content, &parts))
+ 	require.Len(t, parts, 1)
+ 	assert.Equal(t, "output_text", parts[0].Type)
+-	assert.Contains(t, parts[0].Text, "<thinking>internal plan</thinking>")
+-	assert.Contains(t, parts[0].Text, "final answer")
++	assert.Equal(t, "final answer", parts[0].Text)
+ }
+ 
+-func TestChatCompletionsToResponses_AssistantReasoningContentPreserved(t *testing.T) {
++func TestChatCompletionsToResponses_AssistantReasoningContentIsolated(t *testing.T) {
+ 	req := &ChatCompletionsRequest{
+ 		Model: "gpt-4o",
+ 		Messages: []ChatMessage{
+@@ -945,14 +946,15 @@ func TestChatCompletionsToResponses_AssistantReasoningContentPreserved(t *testin
+ 
+ 	var items []ResponsesInputItem
+ 	require.NoError(t, json.Unmarshal(resp.Input, &items))
+-	require.Len(t, items, 2)
++	require.Len(t, items, 3)
++	assert.Equal(t, "reasoning", items[1].Type)
++	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "internal plan"}}, items[1].Summary)
+ 
+ 	var parts []ResponsesContentPart
+-	require.NoError(t, json.Unmarshal(items[1].Content, &parts))
++	require.NoError(t, json.Unmarshal(items[2].Content, &parts))
+ 	require.Len(t, parts, 1)
+ 	assert.Equal(t, "output_text", parts[0].Type)
+-	assert.Contains(t, parts[0].Text, "<thinking>internal plan</thinking>")
+-	assert.Contains(t, parts[0].Text, "final answer")
++	assert.Equal(t, "final answer", parts[0].Text)
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_to_responses.go b/backend/internal/pkg/apicompat/chatcompletions_to_responses.go
+index 4c1a4c87145deaebbe1cead4b9cd937bf4d8af38..ce46f30f71ea3b6a90654c9193ff5f770e80a6f4 100644
+--- a/backend/internal/pkg/apicompat/chatcompletions_to_responses.go
++++ b/backend/internal/pkg/apicompat/chatcompletions_to_responses.go
+@@ -235,30 +235,29 @@ func chatUserToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+ 	return []ResponsesInputItem{{Type: "message", Role: "user", Content: content}}, nil
+ }
+ 
+-// chatAssistantToResponses converts an assistant message. If there is both
+-// text content and tool_calls, the text is emitted as an assistant message
+-// first, then each tool_call becomes a function_call item. If the content is
+-// empty/nil and there are tool_calls, only function_call items are emitted.
++// chatAssistantToResponses converts an assistant message. Reasoning is emitted
++// as a separate reasoning item before any visible assistant text and tool calls.
++// Never turn reasoning into tagged assistant content: clients replay this history
++// on every tool round, and that would teach the model to emit its internal text
++// as an answer. Tool calls retain their order and original call IDs.
+ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+ 	var items []ResponsesInputItem
+-	content := ""
+-
+-	if m.ReasoningContent != "" {
+-		content = "<thinking>" + m.ReasoningContent + "</thinking>"
++	content, partReasoning, err := parseAssistantContent(m.Content)
++	if err != nil {
++		return nil, err
+ 	}
+-
+-	// Emit assistant message with output_text if content is non-empty.
+-	if len(m.Content) > 0 {
+-		s, err := parseAssistantContent(m.Content)
+-		if err != nil {
+-			return nil, err
+-		}
+-		if s != "" {
+-			if content != "" {
+-				content += "\n"
+-			}
+-			content += s
++	reasoning := m.reasoningText()
++	if partReasoning != "" {
++		if reasoning != "" {
++			reasoning += "\n"
+ 		}
++		reasoning += partReasoning
++	}
++	if reasoning != "" {
++		items = append(items, ResponsesInputItem{
++			Type:    "reasoning",
++			Summary: []ResponsesSummary{{Type: "summary_text", Text: reasoning}},
++		})
+ 	}
+ 
+ 	if content != "" {
+@@ -287,36 +286,31 @@ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+ 	return items, nil
+ }
+ 
+-// parseAssistantContent returns assistant content as plain text.
++// parseAssistantContent separates visible assistant text from structured
++// thinking/reasoning parts. A plain string is always visible text, including
++// literal tags inside code examples or user-requested explanations.
+ //
+ // Supported formats:
+ // - JSON string
+ // - JSON array of typed parts (e.g. [{"type":"text","text":"..."}])
+-//
+-// For structured thinking/reasoning parts, it preserves semantics by wrapping
+-// the text in explicit tags so downstream can still distinguish it from normal text.
+-func parseAssistantContent(raw json.RawMessage) (string, error) {
++func parseAssistantContent(raw json.RawMessage) (text, reasoning string, err error) {
+ 	if len(raw) == 0 {
+-		return "", nil
++		return "", "", nil
+ 	}
+ 
+ 	var s string
+ 	if err := json.Unmarshal(raw, &s); err == nil {
+-		return s, nil
++		return s, "", nil
+ 	}
+ 
+ 	var parts []map[string]any
+ 	if err := json.Unmarshal(raw, &parts); err != nil {
+ 		// Keep compatibility with prior behavior: unsupported assistant content
+ 		// formats are ignored instead of failing the whole request conversion.
+-		return "", nil
++		return "", "", nil
+ 	}
+ 
+-	var b strings.Builder
+-	write := func(v string) error {
+-		_, err := b.WriteString(v)
+-		return err
+-	}
++	var visible, internal strings.Builder
+ 	for _, p := range parts {
+ 		typ, _ := p["type"].(string)
+ 		text, _ := p["text"].(string)
+@@ -325,36 +319,18 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
+ 		switch typ {
+ 		case "thinking", "reasoning":
+ 			if thinking != "" {
+-				if err := write("<thinking>"); err != nil {
+-					return "", err
+-				}
+-				if err := write(thinking); err != nil {
+-					return "", err
+-				}
+-				if err := write("</thinking>"); err != nil {
+-					return "", err
+-				}
++				internal.WriteString(thinking)
+ 			} else if text != "" {
+-				if err := write("<thinking>"); err != nil {
+-					return "", err
+-				}
+-				if err := write(text); err != nil {
+-					return "", err
+-				}
+-				if err := write("</thinking>"); err != nil {
+-					return "", err
+-				}
++				internal.WriteString(text)
+ 			}
+ 		default:
+ 			if text != "" {
+-				if err := write(text); err != nil {
+-					return "", err
+-				}
++				visible.WriteString(text)
+ 			}
+ 		}
+ 	}
+ 
+-	return b.String(), nil
++	return visible.String(), internal.String(), nil
+ }
+ 
+ // chatToolToResponses converts a tool result message (role=tool) into a
+diff --git a/backend/internal/pkg/apicompat/types.go b/backend/internal/pkg/apicompat/types.go
+index 130f0ff63b9dd77701781bd324c0a8dd86f1dbb6..fa7112be4d12ee2d8a9c0dc2f339a56718bd3478 100644
+--- a/backend/internal/pkg/apicompat/types.go
++++ b/backend/internal/pkg/apicompat/types.go
+@@ -273,8 +273,9 @@ type ResponsesInputItem struct {
+ 	Role    string          `json:"role,omitempty"`
+ 	Content json.RawMessage `json:"content,omitempty"` // string or []ResponsesContentPart
+ 
+-	// type=reasoning (multi-turn replay of encrypted reasoning)
+-	EncryptedContent string `json:"encrypted_content,omitempty"`
++	// type=reasoning (multi-turn replay, kept separate from visible content)
++	EncryptedContent string             `json:"encrypted_content,omitempty"`
++	Summary          []ResponsesSummary `json:"summary,omitempty"`
+ 
+ 	// type=function_call
+ 	CallID    string `json:"call_id,omitempty"`
+diff --git a/backend/internal/service/openai_gateway_chat_completions.go b/backend/internal/service/openai_gateway_chat_completions.go
+index 482060ec8eb6f3e9f3c938a38650be6c8c18f141..bc2c88ea95928c222043baf7904540f223532689 100644
+--- a/backend/internal/service/openai_gateway_chat_completions.go
++++ b/backend/internal/service/openai_gateway_chat_completions.go
+@@ -7,6 +7,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
++	"net/url"
+ 	"regexp"
+ 	"strconv"
+ 	"strings"
+@@ -237,6 +238,11 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
+ 		}
+ 		responsesReq.Model = upstreamModel
+ 		normalizeResponsesRequestServiceTier(responsesReq)
++		if usesNativeOpenAIResponsesForConvertedChat(account) {
++			if err := omitSyntheticChatReasoningForNativeResponses(responsesReq); err != nil {
++				return nil, fmt.Errorf("normalize converted chat reasoning for native responses: %w", err)
++			}
++		}
+ 		responsesBody, err = json.Marshal(responsesReq)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("marshal responses request: %w", err)
+@@ -609,6 +615,55 @@ func isConvertedResponsesInputStringRejection(status int, responseBody []byte) b
+ 	return responsesInvalidInputTypeMessage.MatchString(message)
+ }
+ 
++// usesNativeOpenAIResponsesForConvertedChat scopes plaintext reasoning removal
++// to native OpenAI destinations. Third-party API-key accounts can implement
++// their own reasoning replay contract even when their platform is "openai".
++func usesNativeOpenAIResponsesForConvertedChat(account *Account) bool {
++	if account == nil {
++		return false
++	}
++	if account.UsesOpenAICodexProtocol() {
++		return true
++	}
++	if !account.IsOpenAIApiKey() {
++		return false
++	}
++	baseURL, err := url.Parse(account.GetOpenAIBaseURL())
++	return err == nil && strings.EqualFold(baseURL.Hostname(), "api.openai.com")
++}
++
++// omitSyntheticChatReasoningForNativeResponses applies only to history just
++// converted from Chat Completions. Its plaintext reasoning summaries are useful
++// to compatible providers but cannot substitute for native OpenAI encrypted
++// reasoning items. Keep encrypted items and all text/tool payloads unchanged.
++// Native Responses-shaped requests bypass this conversion-specific helper.
++func omitSyntheticChatReasoningForNativeResponses(req *apicompat.ResponsesRequest) error {
++	if req == nil || len(req.Input) == 0 {
++		return nil
++	}
++	var items []json.RawMessage
++	if err := json.Unmarshal(req.Input, &items); err != nil {
++		return err
++	}
++	filtered := make([]json.RawMessage, 0, len(items))
++	for _, item := range items {
++		if gjson.GetBytes(item, "type").String() == "reasoning" &&
++			strings.TrimSpace(gjson.GetBytes(item, "encrypted_content").String()) == "" {
++			continue
++		}
++		filtered = append(filtered, item)
++	}
++	if len(filtered) == len(items) {
++		return nil
++	}
++	input, err := json.Marshal(filtered)
++	if err != nil {
++		return err
++	}
++	req.Input = input
++	return nil
++}
++
+ func normalizeResponsesRequestServiceTier(req *apicompat.ResponsesRequest) {
+ 	if req == nil {
+ 		return
+diff --git a/backend/internal/pkg/apicompat/chatcompletions_reasoning_replay_isolation_test.go b/backend/internal/pkg/apicompat/chatcompletions_reasoning_replay_isolation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c67a5210afb696ad5bf2042b83958edaa04c3ce1
+--- /dev/null
++++ b/backend/internal/pkg/apicompat/chatcompletions_reasoning_replay_isolation_test.go
+@@ -0,0 +1,208 @@
++package apicompat
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestChatReasoningReplay_FieldPrecedence(t *testing.T) {
++	for _, tc := range []struct {
++		name, primary, alias, want string
++	}{
++		{name: "reasoning_content", primary: "primary plan", want: "primary plan"},
++		{name: "reasoning alias", alias: "alias plan", want: "alias plan"},
++		{name: "primary wins", primary: "primary plan", alias: "unused alias", want: "primary plan"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			req := &ChatCompletionsRequest{Model: "deepseek-reasoner", Messages: []ChatMessage{
++				{Role: "user", Content: json.RawMessage(`"Question"`)},
++				{Role: "assistant", ReasoningContent: tc.primary, Reasoning: tc.alias, Content: json.RawMessage(`"Answer"`)},
++			}}
++			responses, err := ChatCompletionsToResponses(req)
++			require.NoError(t, err)
++			var items []ResponsesInputItem
++			require.NoError(t, json.Unmarshal(responses.Input, &items))
++			require.Len(t, items, 3)
++			assert.Equal(t, "reasoning", items[1].Type)
++			assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: tc.want}}, items[1].Summary)
++			assert.Empty(t, items[1].Content)
++			var parts []ResponsesContentPart
++			require.NoError(t, json.Unmarshal(items[2].Content, &parts))
++			assert.Equal(t, []ResponsesContentPart{{Type: "output_text", Text: "Answer"}}, parts)
++
++			replayed, err := ResponsesToChatCompletionsRequest(responses)
++			require.NoError(t, err)
++			require.Len(t, replayed.Messages, 2)
++			assert.Equal(t, tc.want, replayed.Messages[1].ReasoningContent)
++			assert.JSONEq(t, `"Answer"`, string(replayed.Messages[1].Content))
++		})
++	}
++}
++
++func TestChatReasoningReplay_ReasoningOnlyDoesNotCreateVisibleMessage(t *testing.T) {
++	for _, content := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`""`)} {
++		req := &ChatCompletionsRequest{Model: "deepseek-reasoner", Messages: []ChatMessage{
++			{Role: "assistant", Content: content, ReasoningContent: "internal plan only"},
++		}}
++		responses, err := ChatCompletionsToResponses(req)
++		require.NoError(t, err)
++		var items []ResponsesInputItem
++		require.NoError(t, json.Unmarshal(responses.Input, &items))
++		require.Len(t, items, 1)
++		assert.Equal(t, "reasoning", items[0].Type)
++		assert.Empty(t, items[0].Content)
++		assert.Empty(t, items[0].Role)
++		assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "internal plan only"}}, items[0].Summary)
++	}
++}
++
++func TestChatReasoningReplay_StructuredPartsStaySeparate(t *testing.T) {
++	req := &ChatCompletionsRequest{Model: "reasoning-model", Messages: []ChatMessage{
++		{Role: "assistant", ReasoningContent: "explicit plan", Content: json.RawMessage(`[
++			{"type":"thinking","thinking":"structured thought"},
++			{"type":"reasoning","text":"; structured reasoning"},
++			{"type":"text","text":"Visible "},
++			{"type":"output_text","text":"answer"}
++		]`)},
++	}}
++	responses, err := ChatCompletionsToResponses(req)
++	require.NoError(t, err)
++	var items []ResponsesInputItem
++	require.NoError(t, json.Unmarshal(responses.Input, &items))
++	require.Len(t, items, 2)
++	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "explicit plan\nstructured thought; structured reasoning"}}, items[0].Summary)
++	var parts []ResponsesContentPart
++	require.NoError(t, json.Unmarshal(items[1].Content, &parts))
++	assert.Equal(t, []ResponsesContentPart{{Type: "output_text", Text: "Visible answer"}}, parts)
++}
++
++func TestChatReasoningReplay_LiteralTagsRemainVisible(t *testing.T) {
++	want := "Example: `<analysis>literal</analysis>` and `<thinking>literal</thinking>`\nDo not rewrite this code."
++	encoded, err := json.Marshal(want)
++	require.NoError(t, err)
++	structured, err := json.Marshal([]ChatContentPart{{Type: "text", Text: want}})
++	require.NoError(t, err)
++	for _, content := range []json.RawMessage{encoded, structured} {
++		req := &ChatCompletionsRequest{Model: "example-model", Messages: []ChatMessage{{Role: "assistant", Content: content}}}
++		responses, err := ChatCompletionsToResponses(req)
++		require.NoError(t, err)
++		var items []ResponsesInputItem
++		require.NoError(t, json.Unmarshal(responses.Input, &items))
++		require.Len(t, items, 1)
++		assert.Equal(t, "message", items[0].Type)
++		assert.Empty(t, items[0].Summary)
++		var parts []ResponsesContentPart
++		require.NoError(t, json.Unmarshal(items[0].Content, &parts))
++		require.Len(t, parts, 1)
++		assert.Equal(t, want, parts[0].Text)
++	}
++}
++
++func TestChatReasoningReplay_MultiRoundToolHistory(t *testing.T) {
++	req := &ChatCompletionsRequest{Model: "deepseek-reasoner", Messages: []ChatMessage{
++		{Role: "user", Content: json.RawMessage(`"Inspect then read the file"`)},
++		{Role: "assistant", Content: json.RawMessage(`"Checking the directory."`), ReasoningContent: "first tool plan", ToolCalls: []ChatToolCall{{
++			ID: "call_list_1", Type: "function", Function: ChatFunctionCall{Name: "list_files", Arguments: `{}`},
++		}}},
++		{Role: "tool", ToolCallID: "call_list_1", Content: json.RawMessage(`"README.md"`)},
++		{Role: "assistant", ReasoningContent: "second tool plan", ToolCalls: []ChatToolCall{{
++			ID: "call_read_2", Type: "function", Function: ChatFunctionCall{Name: "read_file", Arguments: `{"path":"README.md"}`},
++		}}},
++		{Role: "tool", ToolCallID: "call_read_2", Content: json.RawMessage(`"Project details"`)},
++		{Role: "assistant", ReasoningContent: "final plan", Content: json.RawMessage(`"The README describes the project."`)},
++		{Role: "user", Content: json.RawMessage(`"Continue"`)},
++	}}
++
++	// Repeat the conversion twice to catch contamination accumulating during
++	// successive tool rounds, rather than checking only one isolated message.
++	for round := 0; round < 2; round++ {
++		responses, err := ChatCompletionsToResponses(req)
++		require.NoError(t, err)
++		var items []ResponsesInputItem
++		require.NoError(t, json.Unmarshal(responses.Input, &items))
++		for _, item := range items {
++			if item.Type != "message" || item.Role != "assistant" {
++				continue
++			}
++			var parts []ResponsesContentPart
++			require.NoError(t, json.Unmarshal(item.Content, &parts))
++			for _, part := range parts {
++				assert.NotContains(t, part.Text, "tool plan")
++				assert.NotContains(t, part.Text, "final plan")
++				assert.NotContains(t, part.Text, "<thinking>")
++			}
++		}
++
++		req, err = ResponsesToChatCompletionsRequest(responses)
++		require.NoError(t, err)
++		require.Len(t, req.Messages, 7)
++		assert.Equal(t, "first tool plan", req.Messages[1].ReasoningContent)
++		assert.JSONEq(t, `"Checking the directory."`, string(req.Messages[1].Content))
++		require.Len(t, req.Messages[1].ToolCalls, 1)
++		assert.Equal(t, "call_list_1", req.Messages[1].ToolCalls[0].ID)
++		assert.Equal(t, "call_list_1", req.Messages[2].ToolCallID)
++		assert.JSONEq(t, `"README.md"`, string(req.Messages[2].Content))
++		assert.Equal(t, "second tool plan", req.Messages[3].ReasoningContent)
++		require.Len(t, req.Messages[3].ToolCalls, 1)
++		assert.Equal(t, "call_read_2", req.Messages[3].ToolCalls[0].ID)
++		assert.Equal(t, "call_read_2", req.Messages[4].ToolCallID)
++		assert.JSONEq(t, `"Project details"`, string(req.Messages[4].Content))
++		assert.Equal(t, "final plan", req.Messages[5].ReasoningContent)
++		assert.JSONEq(t, `"The README describes the project."`, string(req.Messages[5].Content))
++	}
++}
++
++func TestChatReasoningReplay_AnthropicDoesNotTreatPlainSummaryAsVisibleOrSignedThinking(t *testing.T) {
++	req := &ChatCompletionsRequest{Model: "claude-opus-5-5", Messages: []ChatMessage{
++		{Role: "user", Content: json.RawMessage(`"Read the file"`)},
++		{Role: "assistant", Content: json.RawMessage(`"Reading the file."`), ReasoningContent: "PRIVATE_UNSIGNABLE_PLAN", ToolCalls: []ChatToolCall{{
++			ID: "call_file_1", Type: "function", Function: ChatFunctionCall{Name: "read_file", Arguments: `{"path":"README.md"}`},
++		}}},
++		{Role: "tool", ToolCallID: "call_file_1", Content: json.RawMessage(`"Project details"`)},
++	}}
++	responses, err := ChatCompletionsToResponses(req)
++	require.NoError(t, err)
++	anthropic, err := ResponsesToAnthropicRequest(responses)
++	require.NoError(t, err)
++	var toolUseID, toolResultID string
++	var visible []string
++	for _, message := range anthropic.Messages {
++		assert.NotContains(t, string(message.Content), "PRIVATE_UNSIGNABLE_PLAN")
++		var text string
++		if err := json.Unmarshal(message.Content, &text); err == nil {
++			visible = append(visible, text)
++			continue
++		}
++		var blocks []AnthropicContentBlock
++		require.NoError(t, json.Unmarshal(message.Content, &blocks))
++		for _, block := range blocks {
++			assert.NotEqual(t, "thinking", block.Type, "a plaintext summary cannot supply a provider signature")
++			switch block.Type {
++			case "text":
++				visible = append(visible, block.Text)
++			case "tool_use":
++				toolUseID = block.ID
++				assert.JSONEq(t, `{"path":"README.md"}`, string(block.Input))
++			case "tool_result":
++				toolResultID = block.ToolUseID
++				assert.JSONEq(t, `"Project details"`, string(block.Content))
++			}
++		}
++	}
++	assert.Contains(t, visible, "Reading the file.")
++	assert.NotEmpty(t, toolUseID)
++	assert.Equal(t, toolUseID, toolResultID)
++}
++
++func TestChatReasoningReplay_SummarySurvivesInputItemWireRoundTrip(t *testing.T) {
++	want := ResponsesInputItem{Type: "reasoning", Summary: []ResponsesSummary{{Type: "summary_text", Text: "reasoning only"}}}
++	wire, err := json.Marshal(want)
++	require.NoError(t, err)
++	assert.NotContains(t, string(wire), `"content"`)
++	var got ResponsesInputItem
++	require.NoError(t, json.Unmarshal(wire, &got))
++	assert.Equal(t, want, got)
++}
+diff --git a/backend/internal/pkg/apicompat/reasoning_visibility_isolation_test.go b/backend/internal/pkg/apicompat/reasoning_visibility_isolation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbbd402032bd499e7534258e33c59722d6a54731
+--- /dev/null
++++ b/backend/internal/pkg/apicompat/reasoning_visibility_isolation_test.go
+@@ -0,0 +1,219 @@
++package apicompat
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// A truncated reasoning-only turn still carries useful status and usage, but
++// neither a normal stop nor a token limit makes reasoning into answer text.
++func TestReasoningIsolation_NonStreamingStatusAndUsage(t *testing.T) {
++	for _, finish := range []string{"stop", "length"} {
++		for _, alias := range []bool{false, true} {
++			name := finish + "/reasoning_content"
++			if alias {
++				name = finish + "/reasoning"
++			}
++			t.Run(name, func(t *testing.T) {
++				message := ChatMessage{Role: "assistant", Content: json.RawMessage(`null`)}
++				if alias {
++					message.Reasoning = "private planning only"
++				} else {
++					message.ReasoningContent = "private planning only"
++					message.Reasoning = "ignored alias"
++				}
++				upstream := &ChatCompletionsResponse{
++					Choices: []ChatChoice{{Message: message, FinishReason: finish}},
++					Usage:   &ChatUsage{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18},
++				}
++
++				responses := ChatCompletionsResponseToResponses(upstream, "test-model", nil, nil, false, nil)
++				require.Len(t, responses.Output, 1)
++				require.Equal(t, "reasoning", responses.Output[0].Type)
++				require.Equal(t, "private planning only", responses.Output[0].Summary[0].Text)
++				require.Empty(t, responses.Output[0].Content)
++				require.NotNil(t, responses.Usage)
++				require.Equal(t, 11, responses.Usage.InputTokens)
++				require.Equal(t, 7, responses.Usage.OutputTokens)
++				require.Equal(t, 18, responses.Usage.TotalTokens)
++
++				anthropic := ChatCompletionsResponseToAnthropic(upstream, "test-model")
++				require.Len(t, anthropic.Content, 1)
++				require.Equal(t, "thinking", anthropic.Content[0].Type)
++				require.Equal(t, "private planning only", anthropic.Content[0].Thinking)
++				require.Empty(t, anthropic.Content[0].Text)
++				require.Equal(t, 11, anthropic.Usage.InputTokens)
++				require.Equal(t, 7, anthropic.Usage.OutputTokens)
++				if finish == "length" {
++					require.Equal(t, "incomplete", responses.Status)
++					require.NotNil(t, responses.IncompleteDetails)
++					require.Equal(t, "max_output_tokens", responses.IncompleteDetails.Reason)
++					require.Equal(t, "max_tokens", AnthropicStopReasonString(anthropic.StopReason))
++				} else {
++					require.Equal(t, "completed", responses.Status)
++					require.Nil(t, responses.IncompleteDetails)
++					require.Equal(t, "end_turn", AnthropicStopReasonString(anthropic.StopReason))
++				}
++			})
++		}
++	}
++}
++
++func TestReasoningIsolation_RealAnswerAndLiteralTagsStayIntact(t *testing.T) {
++	const answer = "Documented syntax: <analysis>example</analysis> and <think>example</think>."
++	encoded, err := json.Marshal(answer)
++	require.NoError(t, err)
++	upstream := &ChatCompletionsResponse{Choices: []ChatChoice{{
++		Message:      ChatMessage{Role: "assistant", Content: encoded, ReasoningContent: "private planning"},
++		FinishReason: "stop",
++	}}}
++	responses := ChatCompletionsResponseToResponses(upstream, "test-model", nil, nil, false, nil)
++	require.Len(t, responses.Output, 2)
++	require.Equal(t, "reasoning", responses.Output[0].Type)
++	require.Equal(t, "message", responses.Output[1].Type)
++	require.Equal(t, answer, responses.Output[1].Content[0].Text)
++	anthropic := ChatCompletionsResponseToAnthropic(upstream, "test-model")
++	require.Len(t, anthropic.Content, 2)
++	require.Equal(t, "thinking", anthropic.Content[0].Type)
++	require.Equal(t, "text", anthropic.Content[1].Type)
++	require.Equal(t, answer, anthropic.Content[1].Text)
++
++	chunks := []string{
++		`{"choices":[{"delta":{"reasoning_content":"private planning"}}]}`,
++		`{"choices":[{"delta":{"content":"Documented syntax: <analysis>example</analysis> and <think>example</think>."},"finish_reason":"stop"}]}`,
++	}
++	var responsesText, anthropicText string
++	for _, event := range collectStreamEvents(t, chunks) {
++		if event.Type == "response.output_text.delta" {
++			responsesText += event.Delta
++		}
++		if event.Type == "response.completed" {
++			require.Equal(t, answer, event.Response.Output[1].Content[0].Text)
++		}
++	}
++	for _, event := range collectAnthropicStreamEvents(t, chunks) {
++		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
++			anthropicText += event.Delta.Text
++		}
++	}
++	require.Equal(t, answer, responsesText)
++	require.Equal(t, answer, anthropicText)
++}
++
++func TestReasoningIsolation_NonStreamingToolCallPreserved(t *testing.T) {
++	upstream := &ChatCompletionsResponse{Choices: []ChatChoice{{
++		Message: ChatMessage{
++			Role: "assistant", ReasoningContent: "need tool data",
++			ToolCalls: []ChatToolCall{{ID: "call_123", Type: "function", Function: ChatFunctionCall{
++				Name: "lookup", Arguments: `{"query":"hello"}`,
++			}}},
++		},
++		FinishReason: "tool_calls",
++	}}}
++	responses := ChatCompletionsResponseToResponses(upstream, "test-model", nil, nil, false, nil)
++	require.Len(t, responses.Output, 2)
++	require.Equal(t, "reasoning", responses.Output[0].Type)
++	require.Equal(t, "function_call", responses.Output[1].Type)
++	require.Equal(t, "call_123", responses.Output[1].CallID)
++	require.Equal(t, "lookup", responses.Output[1].Name)
++	require.JSONEq(t, `{"query":"hello"}`, responses.Output[1].Arguments)
++	anthropic := ChatCompletionsResponseToAnthropic(upstream, "test-model")
++	require.Len(t, anthropic.Content, 2)
++	require.Equal(t, "thinking", anthropic.Content[0].Type)
++	require.Equal(t, "tool_use", anthropic.Content[1].Type)
++	require.Equal(t, "call_123", anthropic.Content[1].ID)
++	require.Equal(t, "lookup", anthropic.Content[1].Name)
++	require.JSONEq(t, `{"query":"hello"}`, string(anthropic.Content[1].Input))
++	require.Equal(t, "tool_use", AnthropicStopReasonString(anthropic.StopReason))
++}
++
++func TestReasoningIsolation_StreamingStatusUsageAndFinalizeIdempotence(t *testing.T) {
++	for _, finish := range []string{"stop", "length"} {
++		t.Run(finish, func(t *testing.T) {
++			responsesState := NewChatCompletionsToResponsesStreamState("test-model")
++			anthropicState := NewChatCompletionsToAnthropicStreamState("test-model")
++			var responsesEvents []ResponsesStreamEvent
++			var anthropicEvents []AnthropicStreamEvent
++			chunks := []string{
++				`{"choices":[{"delta":{"reasoning":"private "}}]}`,
++				`{"choices":[{"delta":{"reasoning_content":"planning","reasoning":"ignored alias"}}]}`,
++				`{"choices":[{"delta":{},"finish_reason":"` + finish + `"}]}`,
++				`{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`,
++			}
++			for _, payload := range chunks {
++				var chunk ChatCompletionsChunk
++				require.NoError(t, json.Unmarshal([]byte(payload), &chunk))
++				responsesEvents = append(responsesEvents, ChatCompletionsChunkToResponsesEvents(&chunk, responsesState)...)
++				anthropicEvents = append(anthropicEvents, ChatCompletionsChunkToAnthropicEvents(&chunk, anthropicState)...)
++			}
++			responsesEvents = append(responsesEvents, FinalizeChatCompletionsResponsesStream(responsesState)...)
++			anthropicEvents = append(anthropicEvents, FinalizeChatCompletionsAnthropicStream(anthropicState)...)
++			require.Empty(t, FinalizeChatCompletionsResponsesStream(responsesState))
++			require.Empty(t, FinalizeChatCompletionsAnthropicStream(anthropicState))
++			require.Empty(t, responsesState.Text.String())
++
++			var sawCompleted, sawMessageDelta bool
++			var thinking string
++			for _, event := range responsesEvents {
++				require.NotEqual(t, "response.output_text.delta", event.Type)
++				require.NotEqual(t, "response.output_text.done", event.Type)
++				if event.Type == "response.completed" {
++					sawCompleted = true
++					require.Len(t, event.Response.Output, 1)
++					require.Equal(t, "reasoning", event.Response.Output[0].Type)
++					require.Equal(t, "private planning", event.Response.Output[0].Summary[0].Text)
++					require.NotNil(t, event.Response.Usage)
++					require.Equal(t, 11, event.Response.Usage.InputTokens)
++					require.Equal(t, 7, event.Response.Usage.OutputTokens)
++					require.Equal(t, 18, event.Response.Usage.TotalTokens)
++					if finish == "length" {
++						require.Equal(t, "incomplete", event.Response.Status)
++						require.Equal(t, "max_output_tokens", event.Response.IncompleteDetails.Reason)
++					} else {
++						require.Equal(t, "completed", event.Response.Status)
++						require.Nil(t, event.Response.IncompleteDetails)
++					}
++				}
++			}
++			for _, event := range anthropicEvents {
++				if event.ContentBlock != nil {
++					require.Equal(t, "thinking", event.ContentBlock.Type)
++				}
++				if event.Delta != nil {
++					require.NotEqual(t, "text_delta", event.Delta.Type)
++					thinking += event.Delta.Thinking
++				}
++				if event.Type == "message_delta" {
++					sawMessageDelta = true
++					require.NotNil(t, event.Usage)
++					require.Equal(t, 11, event.Usage.InputTokens)
++					require.Equal(t, 7, event.Usage.OutputTokens)
++					if finish == "length" {
++						require.Equal(t, "max_tokens", event.Delta.StopReason)
++					} else {
++						require.Equal(t, "end_turn", event.Delta.StopReason)
++					}
++				}
++			}
++			require.True(t, sawCompleted)
++			require.True(t, sawMessageDelta)
++			require.Equal(t, "private planning", thinking)
++		})
++	}
++}
++
++func TestReasoningIsolation_TrulyEmptyTurnStillHasEmptyMessage(t *testing.T) {
++	upstream := &ChatCompletionsResponse{Choices: []ChatChoice{{
++		Message: ChatMessage{Role: "assistant"}, FinishReason: "stop",
++	}}}
++	responses := ChatCompletionsResponseToResponses(upstream, "test-model", nil, nil, false, nil)
++	require.Len(t, responses.Output, 1)
++	require.Equal(t, "message", responses.Output[0].Type)
++	require.Empty(t, responses.Output[0].Content[0].Text)
++	anthropic := ChatCompletionsResponseToAnthropic(upstream, "test-model")
++	require.Len(t, anthropic.Content, 1)
++	require.Equal(t, "text", anthropic.Content[0].Type)
++	require.Empty(t, anthropic.Content[0].Text)
++}
+diff --git a/backend/internal/service/openai_gateway_converted_reasoning_test.go b/backend/internal/service/openai_gateway_converted_reasoning_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..70278aa59c920f9a370a3d0b472753d40c233de0
+--- /dev/null
++++ b/backend/internal/service/openai_gateway_converted_reasoning_test.go
+@@ -0,0 +1,152 @@
++package service
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"github.com/tidwall/gjson"
++)
++
++func TestForwardAsChatCompletions_ConvertedReasoningNativeOutboundGate(t *testing.T) {
++	for _, tc := range []struct {
++		name          string
++		accountType   string
++		baseURL       string
++		wantReasoning bool
++		wantHost      string
++	}{
++		{name: "Codex OAuth", accountType: AccountTypeOAuth, wantHost: "chatgpt.com"},
++		{name: "Codex setup token", accountType: AccountTypeSetupToken, wantHost: "chatgpt.com"},
++		{name: "official API key default", accountType: AccountTypeAPIKey, wantHost: "api.openai.com"},
++		{name: "official API key explicit v1", accountType: AccountTypeAPIKey, baseURL: "https://api.openai.com/v1", wantHost: "api.openai.com"},
++		{name: "third party Responses", accountType: AccountTypeAPIKey, baseURL: "https://compatible.example/v1", wantReasoning: true, wantHost: "compatible.example"},
++		{name: "OpenAI-like third-party hostname", accountType: AccountTypeAPIKey, baseURL: "https://api.openai.com.compatible.example/v1", wantReasoning: true, wantHost: "api.openai.com.compatible.example"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			account := convertedReasoningTestAccount(tc.accountType, tc.baseURL)
++			body := []byte(`{"model":"gpt-5.1","messages":[
++				{"role":"user","content":"Look up the example"},
++				{"role":"assistant","reasoning_content":"PRIVATE_REPLAY_PLAN","content":[{"type":"thinking","thinking":"PRIVATE_STRUCTURED_PLAN"},{"type":"text","text":"Keep <analysis>literal</analysis> in this example."}],"tool_calls":[{"id":"call_lookup_1","type":"function","function":{"name":"lookup","arguments":"{\"key\":\"value\"}"}}]},
++				{"role":"tool","tool_call_id":"call_lookup_1","content":"lookup result"},
++				{"role":"user","content":"Continue"}
++			],"stream":false}`)
++			outbound, upstreamRequest := captureConvertedReasoningServiceRequest(t, account, body)
++			require.Equal(t, tc.wantHost, upstreamRequest.URL.Hostname())
++			require.True(t, strings.HasSuffix(upstreamRequest.URL.Path, "/responses"))
++			var items []apicompat.ResponsesInputItem
++			require.NoError(t, json.Unmarshal([]byte(gjson.GetBytes(outbound, "input").Raw), &items))
++			var reasoningCount int
++			var visibleAssistant string
++			var callID, outputCallID, output string
++			for _, item := range items {
++				switch item.Type {
++				case "reasoning":
++					reasoningCount++
++					require.Equal(t, []apicompat.ResponsesSummary{{Type: "summary_text", Text: "PRIVATE_REPLAY_PLAN\nPRIVATE_STRUCTURED_PLAN"}}, item.Summary)
++				case "function_call":
++					callID = item.CallID
++					require.Equal(t, "lookup", item.Name)
++					require.JSONEq(t, `{"key":"value"}`, item.Arguments)
++				case "function_call_output":
++					outputCallID, output = item.CallID, item.Output
++				case "message":
++					if item.Role == "assistant" {
++						var content []apicompat.ResponsesContentPart
++						require.NoError(t, json.Unmarshal(item.Content, &content))
++						for _, part := range content {
++							visibleAssistant += part.Text
++						}
++					}
++				}
++			}
++			if tc.wantReasoning {
++				require.Equal(t, 1, reasoningCount)
++			} else {
++				require.Zero(t, reasoningCount)
++				require.NotContains(t, string(outbound), "PRIVATE_REPLAY_PLAN")
++				require.NotContains(t, string(outbound), "PRIVATE_STRUCTURED_PLAN")
++			}
++			require.Equal(t, "Keep <analysis>literal</analysis> in this example.", visibleAssistant)
++			wantCallID := "call_lookup_1"
++			if account.UsesOpenAICodexProtocol() {
++				// The existing Codex transform normalizes both sides of a
++				// tool pair to its native fc_ prefix.
++				wantCallID = "fc_lookup_1"
++			}
++			require.Equal(t, wantCallID, callID)
++			require.Equal(t, callID, outputCallID)
++			require.Equal(t, "lookup result", output)
++		})
++	}
++}
++
++func TestForwardAsChatCompletions_ConvertedReasoningGateDoesNotRewriteNativeResponsesInput(t *testing.T) {
++	account := convertedReasoningTestAccount(AccountTypeAPIKey, "https://api.openai.com")
++	body := []byte(`{"model":"gpt-5.1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue"}]},{"type":"reasoning","id":"rs_native_stored","summary":[{"type":"summary_text","text":"native client stored summary"}]},{"type":"reasoning","id":"rs_native_encrypted","summary":[{"type":"summary_text","text":"native client encrypted summary"}],"encrypted_content":"native-encrypted-payload"}],"stream":false}`)
++	outbound, _ := captureConvertedReasoningServiceRequest(t, account, body)
++	require.JSONEq(t, gjson.GetBytes(body, "input").Raw, gjson.GetBytes(outbound, "input").Raw)
++}
++
++func TestOmitSyntheticChatReasoningForNativeResponses_PreservesEncryptedAndToolPayloads(t *testing.T) {
++	req := &apicompat.ResponsesRequest{Input: json.RawMessage(`[
++		{"type":"reasoning","summary":[{"type":"summary_text","text":"synthetic plaintext"}]},
++		{"type":"reasoning","id":"rs_native","encrypted_content":"native-payload","summary":[{"type":"summary_text","text":"native summary"}],"opaque":{"keep":true}},
++		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"literal <thinking>example</thinking>"}]},
++		{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
++		{"type":"function_call_output","call_id":"call_1","output":{"result":"untouched"}}
++	]`)}
++	var before []json.RawMessage
++	require.NoError(t, json.Unmarshal(req.Input, &before))
++	require.NoError(t, omitSyntheticChatReasoningForNativeResponses(req))
++	var after []json.RawMessage
++	require.NoError(t, json.Unmarshal(req.Input, &after))
++	require.Len(t, after, 4)
++	for i, item := range after {
++		require.JSONEq(t, string(before[i+1]), string(item))
++	}
++	stableInput := append([]byte(nil), req.Input...)
++	require.NoError(t, omitSyntheticChatReasoningForNativeResponses(req))
++	require.Equal(t, stableInput, []byte(req.Input), "normalization must be idempotent")
++}
++
++func convertedReasoningTestAccount(accountType, baseURL string) *Account {
++	credentials := map[string]any{"api_key": "fixture-key", "access_token": "fixture-token", "chatgpt_account_id": "fixture-account"}
++	if baseURL != "" {
++		credentials["base_url"] = baseURL
++	}
++	return &Account{ID: 201, Platform: PlatformOpenAI, Type: accountType, Concurrency: 1,
++		Credentials: credentials, Extra: map[string]any{"openai_responses_supported": true}}
++}
++
++func captureConvertedReasoningServiceRequest(t *testing.T, account *Account, body []byte) ([]byte, *http.Request) {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
++	c.Request.Header.Set("Content-Type", "application/json")
++	responseBody := strings.Join([]string{
++		`data: {"type":"response.created","response":{"id":"resp_test","model":"gpt-5.1","status":"in_progress","output":[]}}`, "",
++		`data: {"type":"response.output_text.delta","delta":"ok"}`, "",
++		`data: {"type":"response.completed","response":{"id":"resp_test","model":"gpt-5.1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`, "",
++		`data: [DONE]`, "",
++	}, "\n")
++	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusOK,
++		Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(responseBody))}}
++	svc := &OpenAIGatewayService{cfg: structuredInputRetryTestConfig(), httpUpstream: upstream}
++	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
++	require.NoError(t, err)
++	require.NotNil(t, result)
++	require.Len(t, upstream.requests, 1)
++	require.Equal(t, "ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
++	return upstream.lastBody, upstream.lastReq
++}

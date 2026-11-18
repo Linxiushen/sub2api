@@ -1409,10 +1409,9 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 	}
 
 	text := chatMessageContentText(message.Content)
-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
-		text = reasoning
-	}
-	if text != "" || len(message.ToolCalls) == 0 {
+	// Reasoning is a separate protocol item, never a replacement for the final
+	// answer. Preserve the empty-message fallback only for truly empty turns.
+	if text != "" || (len(message.ToolCalls) == 0 && len(outputs) == 0) {
 		outputs = append(outputs, ResponsesOutput{
 			Type: "message",
 			ID:   generateItemID(),
@@ -1809,7 +1808,6 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 	// Close a reasoning item that never transitioned to content (reasoning-only
 	// or empty completion).
 	events = append(events, closeChatReasoningItem(state)...)
-	events = append(events, synthesizeChatReasoningFallbackMessage(state)...)
 
 	if state.MessageItemID != "" {
 		if state.TextPartOpen {
@@ -1942,33 +1940,6 @@ func closeChatReasoningItem(state *ChatCompletionsToResponsesStreamState) []Resp
 			},
 		}),
 	}
-}
-
-func synthesizeChatReasoningFallbackMessage(state *ChatCompletionsToResponsesStreamState) []ResponsesStreamEvent {
-	if state == nil ||
-		state.MessageItemID != "" ||
-		state.Text.Len() > 0 ||
-		state.Reasoning.Len() == 0 ||
-		len(state.ToolCalls) > 0 {
-		return nil
-	}
-
-	text := state.Reasoning.String()
-	if strings.TrimSpace(text) == "" {
-		return nil
-	}
-
-	var events []ResponsesStreamEvent
-	events = append(events, ensureChatToResponsesMessageItem(state)...)
-	events = append(events, ensureChatToResponsesTextPart(state)...)
-	_, _ = state.Text.WriteString(text)
-	events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
-		OutputIndex:  state.MessageIndex,
-		ContentIndex: 0,
-		Delta:        text,
-		ItemID:       state.MessageItemID,
-	}))
-	return events
 }
 
 func ensureChatToResponsesMessageItem(state *ChatCompletionsToResponsesStreamState) []ResponsesStreamEvent {
@@ -2178,7 +2149,7 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 			}},
 		})
 	}
-	if state.MessageItemID != "" || len(state.ToolCalls) == 0 {
+	if state.MessageItemID != "" || (len(state.ToolCalls) == 0 && len(outputs) == 0) {
 		outputs = append(outputs, ResponsesOutput{
 			Type: "message",
 			ID:   nonEmpty(state.MessageItemID, generateItemID()),

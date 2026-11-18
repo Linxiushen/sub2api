@@ -1,0 +1,22 @@
+{
+  "upstream_repository": "https://github.com/Wei-Shaw/sub2api",
+  "base_commit": "69d2fae91318359e4e25c0171eaf70364dad3629",
+  "base_subject": "Merge pull request #8903 from jianjianai/perf/openai-raw-chat-stream-flush",
+  "upstream_version_file": "0.2.22",
+  "local_branch": "codex/reasoning-isolation-fix",
+  "package_label": "Sub2API-reasoning-fix-20261118",
+  "scope": [
+    "Chat Completions history reasoning isolation",
+    "Responses/Anthropic reasoning-only visible-text fallback removal",
+    "native OpenAI/Codex synthetic reasoning outbound gate"
+  ],
+  "customer_incident_confirmed": false,
+  "live_provider_validation": false,
+  "production_deployed": false,
+  "local_image_tag": "sub2api-reasoning-fix:69d2fae-20261118",
+  "local_image_id": "sha256:2eb562de146946034277d32c71c7441535b95fc8c21bc0dff0d3d0e64b0dbe47",
+  "image_platform": "linux/amd64",
+  "test_runtime_platform": "linux/arm64",
+  "image_version": "0.2.22-reasoningfix.20261118",
+  "build_log": "docker-build-linux-amd64.log"
+}

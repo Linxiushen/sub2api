@@ -133,6 +133,8 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/reasoning-fix/
+!docs/reasoning-fix/**
 !docs/agent-resource-safety.md
 !docs/moego-json-batching.md
 !docs/admin-api-keys.md

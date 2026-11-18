@@ -1,0 +1,13 @@
+{
+  "base_commit": "69d2fae91318359e4e25c0171eaf70364dad3629",
+  "patched_tree": "b9b8af1a56a9da8207bd6771d55db5aa0534f430",
+  "patch_applies_to_base": true,
+  "source_matches_patched_tree": true,
+  "source_files": 4729,
+  "new_files": [
+    "backend/internal/pkg/apicompat/chatcompletions_reasoning_replay_isolation_test.go",
+    "backend/internal/pkg/apicompat/reasoning_visibility_isolation_test.go",
+    "backend/internal/service/openai_gateway_converted_reasoning_test.go"
+  ],
+  "patch_sha256": "a774695c77b91d31972a2f9e3dadc86aab5914fc3310c0bf335dfa42c383e7fc"
+}

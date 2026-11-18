@@ -1,0 +1,7 @@
+请在 Sub2API 服务端试用这个修复包。它修复了公开仓库中可复现的两处推理混入正文逻辑，并补充官方 OpenAI/Codex 出站保护。
+
+Linux amd64 可加载包内镜像；其他环境可用 build.sh 构建。各 Harness 继续用原 API 地址，先在隔离测试实例跑原来的多轮和工具用例。操作步骤见 README.md。
+
+客户当前 Sub2API 版本未知。版本差距较大时，优先将 reasoning-isolation.patch 合入现有版本测试。直接升级整版须保留旧镜像及数据库升级前备份，详见 ROLLBACK.md。
+
+这是第三方源码修复包，并非上游官方发行。已有本地回归证据，但还没有客户现场验证；不会强行删除正文中的 <analysis>，也不拦截 Bot 主动展示的 reasoning 字段。

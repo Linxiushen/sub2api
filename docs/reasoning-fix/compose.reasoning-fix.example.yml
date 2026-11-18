@@ -1,0 +1,7 @@
+# Copy into the EXISTING deployment directory as compose.reasoning-fix.yml.
+# Confirm the existing APPLICATION service name; change this key if necessary.
+# This is an override, not a standalone database/Redis deployment.
+services:
+  sub2api:
+    image: sub2api-reasoning-fix:69d2fae-20261118
+    pull_policy: never

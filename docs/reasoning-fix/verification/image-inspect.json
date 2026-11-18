@@ -1,0 +1,80 @@
+[
+  {
+    "Id": "sha256:2eb562de146946034277d32c71c7441535b95fc8c21bc0dff0d3d0e64b0dbe47",
+    "RepoTags": [
+      "sub2api-reasoning-fix:69d2fae-20261118"
+    ],
+    "RepoDigests": [
+      "sub2api-reasoning-fix@sha256:2eb562de146946034277d32c71c7441535b95fc8c21bc0dff0d3d0e64b0dbe47"
+    ],
+    "Comment": "buildkit.dockerfile.v0",
+    "Created": "2026-11-18T02:35:31.923808423Z",
+    "Config": {
+      "ExposedPorts": {
+        "8080/tcp": {}
+      },
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      ],
+      "Entrypoint": [
+        "/app/docker-entrypoint.sh"
+      ],
+      "Cmd": [
+        "/app/sub2api"
+      ],
+      "WorkingDir": "/app",
+      "Labels": {
+        "description": "Sub2API - AI API Gateway Platform",
+        "maintainer": "Wei-Shaw <github.com/Wei-Shaw>",
+        "org.opencontainers.image.source": "https://github.com/Wei-Shaw/sub2api"
+      },
+      "ArgsEscaped": true,
+      "Healthcheck": {
+        "Test": [
+          "CMD-SHELL",
+          "wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/health || exit 1"
+        ],
+        "Interval": 30000000000,
+        "Timeout": 10000000000,
+        "StartPeriod": 10000000000,
+        "Retries": 3
+      }
+    },
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Size": 47241725,
+    "RootFS": {
+      "Type": "layers",
+      "Layers": [
+        "sha256:42cc7504d9d5f918d6ca52d96706e7b602c8ffca5b80b1cad44e004e1c69fb70",
+        "sha256:47f5dffd3002c1c31ca32d703ddbfca71d459a2ab3c645f4ae9b3663c634b178",
+        "sha256:15d5a3d8375e2f8a2a80797f976098c24635ebc111d0879f8fff2e0b4e815732",
+        "sha256:38968d5e709f200e7dd57bf31ff0b4b268f102bb46f5d632fe6c2cbb45effbce",
+        "sha256:d3f3d45a5e61f66b02ea439916d5215dcb9070a655f4764b2ee59efefa5b1099",
+        "sha256:0cd8ea6ba7067769b24eea9c15fc3e85830c5b3e9f8f26e07a9be5d2008e977e",
+        "sha256:352669e309b85069aaad330e2d01419e18e7500053a5a652fec627ca5b33f9f9",
+        "sha256:fd6425a711e4b68785b5b2c012d8f1dab6ef81407e12e8417a11a7176933f66c",
+        "sha256:b27efbec9dea33cc24d88689206727af55bb00d005e48d644036ee22cb82f9c0",
+        "sha256:aadb8e3f4339b390081b93ea0159ac21ed11a5de9ad9f4d2749f74f2d4a0346a",
+        "sha256:7578547716954b36e1a46a03ed63aaffeaf760338b5688250206a6c57062cba3",
+        "sha256:551fcc81c32ee1daee3f373a1a5b075844041ca9a11f3ffbfed1407e05d7dced"
+      ]
+    },
+    "Metadata": {
+      "LastTagTime": "2026-11-18T02:35:34.165382632Z"
+    },
+    "Descriptor": {
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "digest": "sha256:2eb562de146946034277d32c71c7441535b95fc8c21bc0dff0d3d0e64b0dbe47",
+      "size": 856
+    },
+    "Identity": {
+      "Build": [
+        {
+          "Ref": "kahz12x8l3ylvvd9s3g3xsbjd",
+          "CreatedAt": "2026-11-18T02:35:34.167431132Z"
+        }
+      ]
+    }
+  }
+]

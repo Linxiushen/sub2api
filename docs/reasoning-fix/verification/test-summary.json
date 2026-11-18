@@ -1,0 +1,20 @@
+{
+  "apicompat": {
+    "top_level_tests_passed": 505,
+    "including_subtests_passed": 712,
+    "failures": 0,
+    "scope": "full package",
+    "package": "github.com/Wei-Shaw/sub2api/internal/pkg/apicompat",
+    "elapsed_seconds": 0.028,
+    "test_log": "apicompat-tests.jsonl"
+  },
+  "service": {
+    "top_level_tests_passed": 59,
+    "including_subtests_passed": 158,
+    "failures": 0,
+    "scope": "selected forwarding and reasoning regression tests",
+    "package": "github.com/Wei-Shaw/sub2api/internal/service",
+    "elapsed_seconds": 0.263,
+    "test_log": "service-tests.jsonl"
+  }
+}

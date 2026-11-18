@@ -1,3 +1,8 @@
+> **Reasoning 隔离修复版 / reasoning isolation patch**
+> 本仓库基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 的 `69d2fae`，修复协议转换中的推理历史混入正文及 reasoning-only 正文回退，并补充官方 OpenAI/Codex 出站保护。
+> [修复说明与验证记录](docs/reasoning-fix/README.md) · [下载修复包与 Linux amd64 镜像](https://github.com/Linxiushen/sub2api-reasoning-fix/releases/tag/reasoning-fix-20261118)
+> 这是第三方修复版。兼容层 505 项、服务层定向 59 项顶层测试通过；客户实际链路仍待验收。上游项目说明与许可证保留如下。
+
 <div align="center">
 
 <img src="assets/logo.svg" alt="Sub2API Logo" width="128" />

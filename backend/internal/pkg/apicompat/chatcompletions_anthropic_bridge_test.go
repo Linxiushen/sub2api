@@ -403,7 +403,7 @@ func TestChatCompletionsResponseToAnthropic_ToolUse(t *testing.T) {
 	require.Equal(t, "tool_use", AnthropicStopReasonString(out.StopReason))
 }
 
-func TestChatCompletionsResponseToAnthropic_ReasoningOnlyFallback(t *testing.T) {
+func TestChatCompletionsResponseToAnthropic_ReasoningOnlyStaysSeparate(t *testing.T) {
 	resp := &ChatCompletionsResponse{
 		ID:    "chatcmpl-3",
 		Model: "deepseek-v4-pro",
@@ -418,12 +418,9 @@ func TestChatCompletionsResponseToAnthropic_ReasoningOnlyFallback(t *testing.T) 
 	}
 
 	out := ChatCompletionsResponseToAnthropic(resp, "claude-sonnet-4-20250514")
-	// thinking block + text block (fallback uses reasoning as visible text)
-	require.Len(t, out.Content, 2)
+	require.Len(t, out.Content, 1)
 	require.Equal(t, "thinking", out.Content[0].Type)
 	require.Equal(t, "I should think about this", out.Content[0].Thinking)
-	require.Equal(t, "text", out.Content[1].Type)
-	require.Equal(t, "I should think about this", out.Content[1].Text)
 }
 
 func TestChatCompletionsResponseToAnthropic_FinishReasonLength(t *testing.T) {

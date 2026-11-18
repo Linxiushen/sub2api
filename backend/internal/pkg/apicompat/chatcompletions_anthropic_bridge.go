@@ -465,12 +465,9 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	}
 
 	text := chatMessageContentText(message.Content)
-	// DeepSeek reasoning-only fallback: when there is no text and no tool calls,
-	// surface the reasoning content as visible text so the turn isn't empty.
-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
-		text = reasoning
-	}
-	if text != "" || len(message.ToolCalls) == 0 {
+	// A thinking block must stay separate from the final answer, including when
+	// the upstream stops before producing any answer text.
+	if text != "" || (len(message.ToolCalls) == 0 && len(blocks) == 0) {
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
 	}
 

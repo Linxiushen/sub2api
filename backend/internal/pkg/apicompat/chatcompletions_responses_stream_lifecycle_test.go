@@ -45,46 +45,44 @@ func TestStream_ReasoningOpensItemBeforeDelta(t *testing.T) {
 	}
 }
 
-func TestStream_ReasoningOnlySynthesizesVisibleText(t *testing.T) {
+func TestStream_ReasoningOnlyDoesNotBecomeVisibleText(t *testing.T) {
 	events := collectStreamEvents(t, []string{
 		`{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}`,
 		`{"choices":[{"index":0,"delta":{"reasoning_content":"thinking before final"}}]}`,
 		`{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`,
 	})
 
-	open := map[int]string{}
-	var sawTextDelta, sawTextDone, sawMessageDone bool
+	var sawReasoningDone, sawCompleted bool
 	for _, e := range events {
 		switch e.Type {
 		case "response.output_item.added":
 			require.NotNil(t, e.Item)
-			open[e.OutputIndex] = e.Item.Type
-		case "response.output_text.delta":
-			sawTextDelta = true
-			require.Equalf(t, "message", open[e.OutputIndex], "fallback text delta before its item was opened")
-			require.Equal(t, "thinking before final", e.Delta)
-		case "response.output_text.done":
-			sawTextDone = true
+			require.NotEqual(t, "message", e.Item.Type)
+		case "response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done":
+			t.Fatalf("reasoning-only stream produced answer event %s", e.Type)
+		case "response.reasoning_summary_text.done":
+			sawReasoningDone = true
 			require.Equal(t, "thinking before final", e.Text)
 		case "response.output_item.done":
-			if e.Item != nil && e.Item.Type == "message" {
-				sawMessageDone = true
-				require.Equal(t, "thinking before final", e.Item.Content[0].Text)
-			}
+			require.NotNil(t, e.Item)
+			require.Equal(t, "reasoning", e.Item.Type)
 		case "response.completed":
+			sawCompleted = true
 			require.NotNil(t, e.Response)
 			require.Equal(t, "incomplete", e.Response.Status)
 			require.NotNil(t, e.Response.IncompleteDetails)
 			require.Equal(t, "max_output_tokens", e.Response.IncompleteDetails.Reason)
-			require.Len(t, e.Response.Output, 2)
+			require.Len(t, e.Response.Output, 1)
 			require.Equal(t, "reasoning", e.Response.Output[0].Type)
-			require.Equal(t, "message", e.Response.Output[1].Type)
-			require.Equal(t, "thinking before final", e.Response.Output[1].Content[0].Text)
+			require.Equal(t, "thinking before final", e.Response.Output[0].Summary[0].Text)
+			require.NotNil(t, e.Response.Usage)
+			require.Equal(t, 1, e.Response.Usage.InputTokens)
+			require.Equal(t, 2, e.Response.Usage.OutputTokens)
+			require.Equal(t, 3, e.Response.Usage.TotalTokens)
 		}
 	}
-	require.True(t, sawTextDelta, "reasoning-only stream must produce visible text delta")
-	require.True(t, sawTextDone, "reasoning-only stream must close visible text part")
-	require.True(t, sawMessageDone, "reasoning-only stream must close synthesized message item")
+	require.True(t, sawReasoningDone, "reasoning-only stream must close its reasoning item")
+	require.True(t, sawCompleted, "reasoning-only stream must retain a terminal response")
 }
 
 func TestStream_ReasoningOnlyBlankDoesNotSynthesizeVisibleText(t *testing.T) {
@@ -97,10 +95,9 @@ func TestStream_ReasoningOnlyBlankDoesNotSynthesizeVisibleText(t *testing.T) {
 		require.NotEqual(t, "response.output_text.delta", e.Type)
 		if e.Type == "response.completed" {
 			require.NotNil(t, e.Response)
-			require.Len(t, e.Response.Output, 2)
+			require.Len(t, e.Response.Output, 1)
 			require.Equal(t, "reasoning", e.Response.Output[0].Type)
-			require.Equal(t, "message", e.Response.Output[1].Type)
-			require.Equal(t, "", e.Response.Output[1].Content[0].Text)
+			require.Equal(t, "   ", e.Response.Output[0].Summary[0].Text)
 		}
 	}
 }

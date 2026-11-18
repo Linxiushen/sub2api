@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -237,6 +238,11 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		}
 		responsesReq.Model = upstreamModel
 		normalizeResponsesRequestServiceTier(responsesReq)
+		if usesNativeOpenAIResponsesForConvertedChat(account) {
+			if err := omitSyntheticChatReasoningForNativeResponses(responsesReq); err != nil {
+				return nil, fmt.Errorf("normalize converted chat reasoning for native responses: %w", err)
+			}
+		}
 		responsesBody, err = json.Marshal(responsesReq)
 		if err != nil {
 			return nil, fmt.Errorf("marshal responses request: %w", err)
@@ -607,6 +613,55 @@ func isConvertedResponsesInputStringRejection(status int, responseBody []byte) b
 	}
 	message = strings.ToLower(strings.TrimSpace(message))
 	return responsesInvalidInputTypeMessage.MatchString(message)
+}
+
+// usesNativeOpenAIResponsesForConvertedChat scopes plaintext reasoning removal
+// to native OpenAI destinations. Third-party API-key accounts can implement
+// their own reasoning replay contract even when their platform is "openai".
+func usesNativeOpenAIResponsesForConvertedChat(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if account.UsesOpenAICodexProtocol() {
+		return true
+	}
+	if !account.IsOpenAIApiKey() {
+		return false
+	}
+	baseURL, err := url.Parse(account.GetOpenAIBaseURL())
+	return err == nil && strings.EqualFold(baseURL.Hostname(), "api.openai.com")
+}
+
+// omitSyntheticChatReasoningForNativeResponses applies only to history just
+// converted from Chat Completions. Its plaintext reasoning summaries are useful
+// to compatible providers but cannot substitute for native OpenAI encrypted
+// reasoning items. Keep encrypted items and all text/tool payloads unchanged.
+// Native Responses-shaped requests bypass this conversion-specific helper.
+func omitSyntheticChatReasoningForNativeResponses(req *apicompat.ResponsesRequest) error {
+	if req == nil || len(req.Input) == 0 {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(req.Input, &items); err != nil {
+		return err
+	}
+	filtered := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if gjson.GetBytes(item, "type").String() == "reasoning" &&
+			strings.TrimSpace(gjson.GetBytes(item, "encrypted_content").String()) == "" {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	if len(filtered) == len(items) {
+		return nil
+	}
+	input, err := json.Marshal(filtered)
+	if err != nil {
+		return err
+	}
+	req.Input = input
+	return nil
 }
 
 func normalizeResponsesRequestServiceTier(req *apicompat.ResponsesRequest) {
